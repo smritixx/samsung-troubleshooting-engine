@@ -1,0 +1,30 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # LLM (optional — leave LLM_PROVIDER=off for offline-only mode)
+      LLM_PROVIDER: ${LLM_PROVIDER:-off}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-gemini-3.5-flash-lite}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai/}
+      LLM_TIMEOUT_S: ${LLM_TIMEOUT_S:-8}
+      # Web search fallback (optional)
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      TAVILY_TIMEOUT_S: ${TAVILY_TIMEOUT_S:-20}
+      TAVILY_MAX_RESULTS: ${TAVILY_MAX_RESULTS:-5}
+      # Cache backend
+      REDIS_URL: redis://redis:6379/0
+      # Retrieval toggles
+      USE_REAL_EMBEDDINGS: "auto"
+      USE_REAL_RERANKER: "auto"
+      USE_FAISS: "auto"
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "no"]
