@@ -108,15 +108,17 @@ Response contains a `contexts` array of goals, each with actions and stepGroups.
     instructions.md
     README.md
 
-    PRISM_GENAI_HACKATHON_Y2026_SUBMISSION/
-      TeamName_Submission.pptx    (pitch deck)
-      TeamName_Demo.mp4           (demo video)
+
 
 ---
 
-## Submission assets
+## Demo
 
-The pitch deck and demo video are present in this repository inside `PRISM_GENAI_HACKATHON_Y2026_SUBMISSION/`. All three artifacts (PPT, video, README) are part of the tagged commit `PRISM_GENAI_HACKATHON_Y2026`.
+[Watch the Demo Video on YouTube](https://youtu.be/ljXBlslo41c?si=mVJTATQ-jfOJbd1v)
+
+## Presentation
+
+[Download the Submission PPT](./submission/TIET_Nexora.pdf)
 
 ---
 
@@ -142,10 +144,9 @@ The pitch deck and demo video are present in this repository inside `PRISM_GENAI
 
 ## Team
 
-- **[Teammate 1]** — AI/RAG, retrieval, embeddings
-- **[Teammate 2]** — LLM, backend, validators
-- **[Teammate 3]** — Deeplink resolver, risk ordering
-- **[Teammate 4]** — Frontend, evaluation, DevOps
+- **[Saumya]**
+- **[Smriti Gupta]**
+- **[Aastha Gupta]**
 
 ---
 
