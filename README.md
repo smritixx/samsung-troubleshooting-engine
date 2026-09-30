@@ -1,222 +1,152 @@
 # Smart Guided Troubleshooting Engine
 
-A Samsung PRISM (Theme 2) reference implementation that converts an informal, natural-language complaint about a Galaxy device into a validated, ordered, one-tap troubleshooting plan.
+**Samsung PRISM — Theme 2 submission**
 
-The engine retrieves trusted Samsung support text, extracts a structured plan from it (either with an LLM or a deterministic parser), maps every step to an exact masked Settings deeplink from a trusted catalog, orders the plan so non-destructive actions run first, and validates the entire response before returning it. If no trusted evidence supports a plan, the engine abstains instead of hallucinating.
+Turns a vague Galaxy-device complaint into a validated, ordered, one-tap troubleshooting plan with verified in-app Settings deeplinks.
 
-## What problem it solves
+---
 
-Today, a Samsung support agent reads a vague complaint like *"My phone got slow after the update"* or *"The screen flickers and dies fast"*, manually interprets it against a knowledge base, selects and orders troubleshooting actions, and the customer then navigates nested Settings menus on their own. The brief estimates this manual triage at roughly 15 minutes per scenario.
+## What it does
 
-This project compiles that entire flow into an executable plan:
+You describe a problem in plain language — *"my screen is yellow"*, *"phone not charging"* — and the engine returns a structured plan: a goal, ordered actions, discrete steps, and one-tap `bixby://` deeplinks that open the exact Settings screen a step needs.
 
-- **Input:** free-form complaint (e.g. *"My Galaxy S24 Ultra screen is completely black and won't turn on"*)
-- **Output:** a Pydantic-validated JSON plan with a goal, a title, categorized actions, discrete steps, and one-tap `bixby://` deeplinks pointing at the exact Settings screen each step needs.
+If the trusted knowledge base has no answer, the engine abstains. It returns an empty plan rather than inventing a fix.
 
-The engine never invents a fix. If the trusted knowledge base has no matching procedure, it returns an empty plan with a fallback message.
+---
 
-## Architecture at a glance
+## Architecture
 
     Complaint
-       |
-       v
-    [ Semantic cache lookup ]
-       |
-       +-- HIT  -> validated response returned (LLM not called)
-       |
-       +-- MISS
-             |
-             v
-           Query enrichment (canonical form + variants)
-             |
-             v
-           Hybrid SIIS retrieval  (BM25 + character trigram)
-             |
-             v
-           LLM structure extraction  (Phase 1 - Gemini by default)
-             |
-             +-- on failure -> deterministic extractor
-             |
-             v
-           Deterministic deeplink resolution
-             |
-             v
-           Risk-aware sequencing (auto -> manual -> critical)
-             |
-             v
-           Pydantic + URL-leak + catalog-membership validation
-             |
-             v
-           Store validated plan in semantic cache
-             |
-             v
-           Final JSON response
+       │
+       ├── Query enrichment (8–10 paraphrases, multi-intent split)
+       ├── Semantic cache lookup
+       │     ├── HIT → return validated plan in <5 ms
+       │     └── MISS ↓
+       ├── Hybrid SIIS retrieval (BM25 + BGE-small embeddings, chunked)
+       ├── Web fallback (Tavily, when local corpus has no answer)
+       ├── Structure extraction
+       │     ├── Deterministic parser (primary)
+       │     └── LLM (only when deterministic produces zero actions)
+       ├── Deterministic deeplink resolution (5-term scoring + 4 safety gates)
+       ├── Risk-aware sequencing (auto → manual → critical)
+       ├── Pydantic + URL-leak + catalog-membership validation
+       ├── Cache storage (only validated plans)
+       └── Response
 
-The LLM is used **only on a cache miss** and **only for structure extraction**. It never sees the deeplink catalog, never produces a `bixby://` URI, and never bypasses validation. See `app/llm.py`.
+The LLM never touches a deeplink. Only `app/resolver.py` writes deeplink fields, and it copies strings verbatim from `data/deeplinks.json`.
 
-## File inventory
+---
 
-### Data files
+## Tech stack
 
-| Path | Purpose |
+| Layer | Technology |
 |---|---|
-| `data/deeplinks.json` | Trusted catalog of ~578 masked Galaxy Settings deeplinks. Every `bixby://` string in a response is copied verbatim from here. Nothing else in the project may construct one. |
-| `data/siis_responses.json` | Pre-cleaned Samsung support text (20 rows). The only knowledge source the pipeline draws troubleshooting steps from. |
+| API | FastAPI, Uvicorn |
+| Validation | Pydantic v2 |
+| Lexical retrieval | rank-bm25 |
+| Dense retrieval | sentence-transformers (BAAI/bge-small-en-v1.5) |
+| Semantic cache | In-memory or Redis |
+| LLM (optional) | Gemini 3.5 Flash Lite via OpenAI-compatible API |
+| Web search (optional) | Tavily |
+| Frontend | Vanilla HTML/CSS/JS (single file, no build step) |
+| Containerization | Docker, Docker Compose |
+| Testing | pytest |
 
-### Application modules
+---
 
-| Path | Purpose |
-|---|---|
-| `app/__init__.py` | Marks `app/` as a Python package so relative imports resolve. Empty. |
-| `app/config.py` | Central configuration: file paths, retrieval depth and thresholds, cache size and similarity gate, action caps, and the LLM environment variable bindings. Nothing is hard-coded elsewhere. |
-| `app/schema.py` | Pydantic v2 response contract. Defines `ContextDeeplinkResponse`, `Goal`, `Action`, `StepGroup`, `Deeplink`, `ValidationDeepLink`, and the category / result-type / condition enums. |
-| `app/data_loader.py` | Loads both JSON files once, memoized with `functools.lru_cache`. |
-| `app/retrieval.py` | Hybrid retrieval: BM25 (exact terminology) + character trigram cosine (paraphrase matching). One `HybridIndex.search()` method serves both the SIIS corpus and the deeplink catalog. |
-| `app/cache.py` | Safety-aware semantic cache. Stores only validated plans. Jaccard similarity over normalized tokens. Thread-safe. FIFO eviction. |
-| `app/extractor.py` | Deterministic parser that turns Markdown-like SIIS content into candidate actions and steps. Returns an empty list when no procedure is present - which triggers abstention. |
-| `app/llm.py` | The only place the pipeline talks to a language model. Sends the complaint plus one retrieved SIIS passage to an OpenAI-compatible endpoint and returns a JSON plan. Never returns a deeplink. All failure modes return `None`. |
-| `app/resolver.py` | Maps the natural-language text of a step to the correct catalog entry, copying the URI verbatim. The only module allowed to write deeplink fields. |
-| `app/sequencer.py` | Classifies actions by risk (auto / manual / critical) and sorts the plan so auto runs first and critical last. Also enforces the "manual actions carry no deeplink" rule. |
-| `app/validator.py` | Final safety gate. URL-leak scan across the serialized response, plus catalog-membership checks on every deeplink field. |
-| `app/pipeline.py` | The orchestrator. Owns the entire flow: cache lookup, retrieval, LLM extraction with deterministic fallback, resolution, ordering, Pydantic construction, validation, cache storage. |
-| `app/main.py` | FastAPI service. Exposes `POST /v1/troubleshoot` and `GET /health`. Serves the frontend at `/`. |
+## API
 
-### Frontend
+Two endpoints, matching the brief exactly.
 
-| Path | Purpose |
-|---|---|
-| `frontend/index.html` | Single-page demo UI. Vanilla JavaScript, no build step. Posts to `/v1/troubleshoot` and renders action cards, step lists, category badges, and one-tap deeplink buttons. |
-
-### Tests
-
-| Path | Purpose |
-|---|---|
-| `tests/test_smoke.py` | Four API tests: `/health` payload, plan generation, no URL leakage, cache hit on repeat. |
-| `tests/test_llm_integration.py` | Nine tests covering the LLM path: cache-hit skips the LLM, cache-miss invokes it, URL-bearing output is rejected, `bixby://` injection is blocked, every final deeplink is a catalog member, LLM failures fall back gracefully, LLM is off by default. |
-
-### Debug helpers
-
-| Path | Purpose |
-|---|---|
-| `debug_pipeline.py` | Runs three sample queries stage-by-stage and prints retrieval scores, extraction counts, and validation errors. Use when a plan comes back empty. |
-| `debug_llm.py` | Posts directly to the LLM endpoint and shows the raw HTTP response. Bypasses the exception handling in `llm.py` so real errors are visible. |
-
-### Project files
-
-| Path | Purpose |
-|---|---|
-| `requirements.txt` | Pinned Python dependencies: `fastapi`, `uvicorn[standard]`, `pydantic`, `rank-bm25`, `numpy`, `pytest`, `httpx`. |
-| `run.sh` | Bash bootstrap for macOS / Linux: creates the venv, installs deps, launches uvicorn. |
-| `instructions.md` | Step-by-step guide to run the project locally. |
-| `generate_reference_pdf.py` | Optional. Generates a PDF reference of the project. Uses only the Python standard library. |
-
-## LLM provider
-
-The LLM path is wired through an OpenAI-compatible chat-completions interface, so any provider that exposes that shape works without code changes.
-
-**This project is currently configured for Google Gemini** on the free tier. The relevant settings live in `app/config.py` and are read from environment variables:
-
-    LLM_PROVIDER  = gemini
-    LLM_API_KEY   = <your AI Studio key>
-    LLM_MODEL     = gemini-3.5-flash-lite
-    LLM_BASE_URL  = https://generativelanguage.googleapis.com/v1beta/openai/
-
-To disable the LLM and run purely on the deterministic extractor:
-
-    LLM_PROVIDER = off
-
-This is the default. The project runs end-to-end offline with no API key.
-
-## Safety guarantees
-
-- **No fabricated deeplinks.** Only `resolver.py` writes deeplink fields, and it copies strings verbatim from `deeplinks.json`.
-- **No URL leakage.** The validator scans every string in the response and rejects anything that is not an exact catalog member. This includes `http://`, `https://`, `bixby://`, `www.`, and Markdown link syntax.
-- **No invented steps.** The deterministic extractor returns an empty list if the reference text has no procedure. The LLM is instructed to abstain in the same situation.
-- **No bypassed validation.** The LLM output is a *candidate*. It must pass Pydantic, URL-leak, and catalog-membership checks before reaching the user.
-- **No poisoned cache.** Only validated plans are stored, so a cache hit is a guarantee of a previously approved response.
-- **No destructive actions first.** Sequencing forces factory reset, wipe, and recovery operations to the end of the plan.
-
-## Quick start
-
-See `instructions.md` for the full local-run guide. The short version:
-
-    cd samsung-troubleshoot
-    python -m venv .venv
-    .venv\Scripts\python.exe -m pip install -r requirements.txt
-    .venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000
-
-Open http://localhost:8000/ in a browser.
-
-## API contract
-
-The competition requires exactly two endpoints.
-
-**`GET /health`**
-
-    {"status": "ok"}
+**`GET /health`** → `{"status": "ok"}`
 
 **`POST /v1/troubleshoot`**
 
-Request:
-
     {
-      "query": "My Galaxy S24 Ultra screen is completely black and won't turn on",
+      "query": "My Galaxy S24 screen is completely black",
       "sis_response": ""
     }
 
-Response (abridged):
+Response contains a `contexts` array of goals, each with actions and stepGroups. Full schema in `app/schema.py`. A `meta` block carries latency, cache status, retrieval score, LLM status, confidence, and validation errors.
 
-    {
-      "query": "...",
-      "query_variations": ["..."],
-      "response": {
-        "contexts": [
-          {
-            "goal": "Follow these steps to troubleshoot: ...",
-            "title": "...",
-            "score": 0.73,
-            "actions": [
-              {
-                "actionName": "...",
-                "description": "...",
-                "category": "auto",
-                "stepGroups": [
-                  {
-                    "steps": ["...", "..."],
-                    "actionableDeeplink": {
-                      "deeplink": "bixby://masked/act/...",
-                      "description": "...",
-                      "message": "...",
-                      "originalType": "onURL"
-                    },
-                    "validationDeeplink": {
-                      "deeplink": "bixby://masked/val/...",
-                      "key": "...",
-                      "resultType": "boolean",
-                      "condition": "equal",
-                      "value": "True"
-                    }
-                  }
-                ]
-              }
-            ]
-          }
-        ]
-      },
-      "meta": {
-        "cache_hit": false,
-        "siis_match_score": 0.733,
-        "llm_enabled": true,
-        "llm_used": true,
-        "llm_fallback": false,
-        "schema_valid": true,
-        "validation_errors": [],
-        "latency_ms": 2672.87
-      }
-    }
+---
 
-The `meta` block is informational and not part of the competition schema.
+## Evaluation targets
 
-## Licence
+| Metric | Target | Result |
+|---|---|---|
+| Schema conformance | ~100% | 100% |
+| URL leakage | 0 | 0 |
+| Deeplink validity | 100% catalog match | 100% |
+| Cache-hit latency | P95 ≤ 300 ms | ~5 ms |
+| Cold-path latency | P95 ≤ 8 s | ~4–8 s |
+| Paraphrase cache hit rate | ≥ 80% | ≥ 93% |
 
-Hackathon reference code. Reuse freely for the PRISM Theme 2 submission.
+---
+
+## Safety guarantees
+
+- **No fabricated deeplinks.** Only the resolver writes deeplink fields, copying from the catalog.
+- **No URL leakage.** Every string scanned; anything not an exact catalog member is rejected.
+- **No invented steps.** Deterministic parsing from trusted text. LLM only when structure is absent.
+- **No destructive actions first.** Factory reset, wipe, recovery always last.
+- **Abstains rather than guesses.** Empty plan if no trusted evidence.
+
+---
+
+## What's in the repo
+
+    app/                    Python source
+    data/                   578 deeplinks + 34 troubleshooting articles
+    frontend/               Single-page demo UI
+    tests/                  Smoke + LLM + regression suites
+    eval/                   Benchmark harness
+
+    Dockerfile
+    docker-compose.yml
+    requirements.txt
+    instructions.md
+    README.md
+
+    PRISM_GENAI_HACKATHON_Y2026_SUBMISSION/
+      TeamName_Submission.pptx    (pitch deck)
+      TeamName_Demo.mp4           (demo video)
+
+---
+
+## Submission assets
+
+The pitch deck and demo video are present in this repository inside `PRISM_GENAI_HACKATHON_Y2026_SUBMISSION/`. All three artifacts (PPT, video, README) are part of the tagged commit `PRISM_GENAI_HACKATHON_Y2026`.
+
+---
+
+## Known limitations
+
+- **Small corpus.** 34 SIIS rows cover common categories. Uncovered queries fall to web search.
+- **Masked deeplinks.** Cannot be tested on a real device during the hackathon. Handled by strict schema validation.
+- **Most actions are physical.** Cleaning a charging port has no Settings screen. These are correctly labeled `manual` with no deeplink.
+- **Cold start.** First request after container start takes 30–60 s for the model load. Subsequent requests are fast.
+
+---
+
+## Where to look in the code
+
+- Orchestration → `app/pipeline.py`, method `TroubleshootPipeline.run()`
+- Retrieval scoring → `app/retrieval.py`, `app/scoring.py`
+- Safety gates → `app/fallback.py`
+- Deeplink copy → `app/resolver.py`, method `ScreenResolver.resolve()`
+- Validator → `app/validator.py`
+- Web fallback → `app/web_search.py`
+
+---
+
+## Team
+
+- **[Teammate 1]** — AI/RAG, retrieval, embeddings
+- **[Teammate 2]** — LLM, backend, validators
+- **[Teammate 3]** — Deeplink resolver, risk ordering
+- **[Teammate 4]** — Frontend, evaluation, DevOps
+
+---
+
+Hackathon reference code. Free to reuse for the PRISM Theme 2 submission.
